@@ -25,4 +25,3 @@ python piano_convert.py -i <input_dir> -o <output_dir>
 
 - Support more sites, with more rules
 - Optional output format (image, txt, gp5...)
-
