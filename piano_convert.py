@@ -4,11 +4,6 @@ from PIL import Image
 import os
 import argparse
 
-parser = argparse.ArgumentParser(description="Tab pics converter for ChongChong Music")
-parser.add_argument('-i', action="store", dest="input_dir", default='.', help="Input directory")
-parser.add_argument('-o', action="store", dest="output_dir", default='output', help="Output directory")
-
-
 ALLOW_EXT = [
   'gif',
   'png',
@@ -60,6 +55,12 @@ class TabConverter:
       print "Output is", outputName
 
 if __name__ == '__main__':
+  parser = argparse.ArgumentParser(description="Tab pics converter for ChongChong Music")
+  parser.add_argument('-i', dest="input_dir", default='.'
+      , help="Input directory")
+  parser.add_argument('-o', action="store", dest="output_dir", default='output'
+      , help="Output directory")
+
   args = parser.parse_args()
 
   converter = TabConverter(args.input_dir, args.output_dir)
