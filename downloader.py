@@ -8,6 +8,8 @@ import urlparse
 import ipdb
 import shutil
 import re
+import gevent
+from gevent import monkey
 
 ###########
 #  Utils  #
@@ -80,29 +82,33 @@ class TabDownloader:
             hostname = urlTupples.hostname
             imgUrl = urlparse.urljoin(scheme + '://' + hostname, src)
 
-            hasMore = True
+            page_node = ht.xpath('//div[@id="yy2"]').pop()
+            page_text = page_node.text.split('/').pop().strip()
+            pages_num = int(page_text[1:-1])
+
+            total_imgs = pages_num
             index = self.start_index
-            try:
-              while hasMore:
-                # -----------
-                m = re.search(self.imgurl_pattern, imgUrl)
-                if not m:
-                  hasMore = False
-                  break
-                ext = m.group('ext')
-                match_str = m.group()
-                _url = imgUrl.replace(match_str, str(index)+'.'+ext)
-                print "Downloading image: ", _url
-                # TODO: gevent ?
-                # TODO: 可以循环推出全部图片的url, 用正则?
-                img_downloader = ImageDownloader(_url)
-                img_downloader.tabname = tabname
-                img_downloader.data_dir = self.data_dir
-                img_downloader.download()
-                index += 1
-            except NotFoundError as err:
-              print "Not found file", err
-              print "Download ended"
+            jobs = []
+            while index <= total_imgs:
+              # -----------
+              m = re.search(self.imgurl_pattern, imgUrl)
+              if not m:
+                hasMore = False
+                break
+              ext = m.group('ext')
+              match_str = m.group()
+              _url = imgUrl.replace(match_str, str(index)+'.'+ext)
+              print "Downloading image: ", _url
+              img_downloader = ImageDownloader(_url)
+              img_downloader.tabname = tabname
+              img_downloader.data_dir = self.data_dir
+              #img_downloader.download()
+              job = gevent.spawn(img_downloader.download)
+              jobs.append(job)
+              index += 1
+
+            gevent.joinall(jobs)
+            gevent.sleep(0.1)
 
     def options(self):
         options = {}
@@ -139,6 +145,7 @@ class ImageDownloader:
             shutil.copyfileobj(response.raw, out_file)
 
         del response
+        return
 
     def options(self):
         options = {}
@@ -162,6 +169,8 @@ if __name__ == '__main__':
     #print argObj
     url = sys.argv[1]
     urlTupples = urlparse.urlparse(url)
+
+    monkey.patch_all() # ?
 
     downloader = TabDownloader(url)
     downloader.data_dir = argObj.data_dir
