@@ -1,15 +1,15 @@
 #-*- coding: utf-8 -*-
 import requests
-import lxml.etree as etree
 import argparse
 import sys, os
 import urlparse
-#import termcolor
 import ipdb
 import shutil
 import re
 import gevent
 from gevent import monkey
+from gevent.pool import Pool as Pool
+from BeautifulSoup import BeautifulSoup
 
 ###########
 #  Utils  #
@@ -20,7 +20,7 @@ class NotFoundError(Exception):
     def __init__(self, url):
         self.url = url
     def __str__(self):
-      return repr(self.url)
+        return repr(self.url)
 
 
 #################
@@ -31,88 +31,115 @@ class NotFoundError(Exception):
 # TODO: different site, different xpath rules
 class TabDownloader:
     urls=[]
-    start_index = 1
     data_dir = 'data'
-    tmp_dir = 'tmp'
-    imgurl_pattern = '\d+.(?P<ext>png|gif)'
+    tmp_dir = 'temp'
 
     def __init__(self, urls):
         if type(urls) == str:
             urls = [urls]
         self.urls = urls
 
+    def parse(self, content):
+      '''
+      parse contents
+      @return {dict}
+        'tabname': {str}
+        'pic_srcs': {list}
+      '''
+      soup = BeautifulSoup(content, fromEncoding='gb18030')
+      headEle = soup.html
+      titleEle = headEle.title
+
+      if titleEle:
+        title_text = titleEle.text
+        tabname = title_text.split('-')[0]
+      else:
+        keywordEle = headEle.find(attrs={'name': re.compile("keywords$")})
+        keywords = keywordEle.get('content')
+        tabname = keywords.split(',')[0]
+      print "tabname is", tabname
+
+      # find script that contains the urls
+      script_tags = headEle.findAll('script',language=re.compile('javascript'))
+      script_content = script_tags[0].string
+
+      # get picurls out
+      picurl_pattern = re.compile('picurl\.length.*img.*\>\";[\r\n]$', re.MULTILINE | re.DOTALL)
+      matched_string = picurl_pattern.search(script_content)
+      if not matched_string:
+        print "no matched_string"
+        return
+      matched_string = matched_string.group()
+      lines = matched_string.split('\n')
+
+      img_tag_lines = lines[1].split(';')[:-1]
+      url_pattern = re.compile('src=.?\"(?P<img_url>.+).+\"\s\>\"')
+
+      pic_srcs = []
+      for tag_line in img_tag_lines:
+          _matches = url_pattern.search(tag_line)
+          if _matches:
+              pic_srcs.append(_matches.group('img_url'))
+
+      return {
+          'tabname': tabname,
+          'pic_srcs': pic_srcs
+      }
+
+
+    # TODO: 参考grequests, 应该使用requests的Session, 暂时都是unsent的状态
+    #       然后再用gevent的spawn来send ?
     def start_download(self):
         if len(self.urls):
-          if not os.path.isdir(self.tmp_dir):
-            os.mkdir(self.tmp_dir)
-          if not os.path.isdir(self.data_dir):
-            os.mkdir(self.data_dir)
+            if not os.path.isdir(self.tmp_dir):
+                os.mkdir(self.tmp_dir)
+            if not os.path.isdir(self.data_dir):
+                os.mkdir(self.data_dir)
 
         for url in self.urls:
             htmlFilename = url.split('/').pop()
             htmlFilepath = os.path.join(self.tmp_dir, htmlFilename)
             if os.path.isfile(htmlFilepath):
-              f = open(htmlFilepath)
-              content = ''.join(f.readlines())
-              f.close()
+                f = open(htmlFilepath)
+                content = ''.join(f.readlines())
+                f.close()
             else:
-              print "Requesting for ", url
-              response = requests.get(url)
-              content = response.content
-              f = open(htmlFilepath, 'w')
-              f.writelines(content)
-              f.close()
+                print "Requesting for ", url
+                response = requests.get(url)
+                content = response.content
+                f = open(htmlFilepath, 'w')
+                f.writelines(content)
+                f.close()
 
-            ht = etree.HTML(content)
+            parsed_dict = self.parse(content)
+            pic_srcs = parsed_dict['pic_srcs']
+            tabname = parsed_dict['tabname']
 
-            keywordEle = ht.xpath("//meta[@name='keywords']").pop()
-            keywords = keywordEle.get('content')
-            tabname = keywords.split(',')[0]
-            print "tabname is", tabname
-
-            imgEle = ht.xpath("//div[@id='upid']/img")
-            if not len(imgEle):
-                print "Error: there is no tab image in this page"
-                exit()
-            imgEle = imgEle.pop()
-            src = imgEle.get('src')
+            imgs_length = len(pic_srcs)
 
             urlTupples = urlparse.urlparse(url)
             scheme = urlTupples.scheme
             hostname = urlTupples.hostname
-            imgUrl = urlparse.urljoin(scheme + '://' + hostname, src)
 
-            page_node = ht.xpath('//div[@id="yy2"]').pop()
-            page_text = page_node.text.split('/').pop().strip()
-            pages_num = int(page_text[1:-1])
+            # for test
+            #pages_num = 0
 
-            total_imgs = pages_num
-            index = self.start_index
             jobs = []
-            while index <= total_imgs:
-              # -----------
-              m = re.search(self.imgurl_pattern, imgUrl)
-              if not m:
-                hasMore = False
-                break
-              ext = m.group('ext')
-              match_str = m.group()
-              _url = imgUrl.replace(match_str, str(index)+'.'+ext)
-              print "Downloading image: ", _url
-              img_downloader = ImageDownloader(_url)
-              img_downloader.tabname = tabname
-              img_downloader.data_dir = self.data_dir
-              #img_downloader.download()
-              job = gevent.spawn(img_downloader.download)
-              jobs.append(job)
-              index += 1
+            for pic_src in pic_srcs:
+                # -----------
+                _url = urlparse.urljoin(scheme + '://' + hostname, pic_src)
+                print "Downloading image: ", _url
+                img_downloader = ImageDownloader(_url)
+                img_downloader.tabname = tabname
+                img_downloader.data_dir = self.data_dir
+                job = gevent.spawn(img_downloader.download)
+                jobs.append(job)
 
-            gevent.joinall(jobs)
-            gevent.sleep(0.1)
+        return gevent.joinall(jobs)
 
     def options(self):
         options = {}
-        for attr in ['start_index', 'data_dir', 'urls']:
+        for attr in ['data_dir', 'urls']:
             options[attr] = getattr(self, attr)
         return options
 
@@ -121,15 +148,18 @@ class ImageDownloader:
     url=''
     data_dir = 'data'
     tabname = 'tab'
+    filename = 'tab_image'
 
     def __init__(self, url):
         self.url = url
 
     def download(self):
+        # TODO: seperate save and parse method
         name = self.url.split('/')[-1]
 
         name_to_save = self.tabname + '_' + name
         filename = os.path.join(self.data_dir, name_to_save)
+        self.filename = filename
         if os.path.isfile(filename):
             print "File: ", name_to_save, " already exists"
             return
@@ -137,15 +167,18 @@ class ImageDownloader:
         response = requests.get(self.url, stream=True)
         if not response.ok:
             if response.status_code == 404:
+                del response
                 raise NotFoundError(self.url)
+        gevent.sleep(0)
+        self.response = response
+        self.save()
+        del self
 
-
-        print "Saving file ", filename
-        with open(filename, 'wb') as out_file:
-            shutil.copyfileobj(response.raw, out_file)
-
-        del response
-        return
+    def save(self):
+        print "Saving file ", self.filename
+        with open(self.filename, 'wb') as out_file:
+            shutil.copyfileobj(self.response.raw, out_file)
+        return self
 
     def options(self):
         options = {}
@@ -158,8 +191,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Tab pics converter for ChongChong Music")
     parser.add_argument('-d', dest="data_dir", default='input',
             help='Directory to store downloaded files')
-    parser.add_argument('-t', dest="temp_dir", default='tmp',
-            help="Directory to store temp files. default to 'tmp'")
+    parser.add_argument('-t', dest="temp_dir", default='temp',
+            help="Directory to store temp files. default to 'temp'")
     if len(sys.argv) < 2:
         print "Please enter at least the url"
         exit()
@@ -170,7 +203,7 @@ if __name__ == '__main__':
     url = sys.argv[1]
     urlTupples = urlparse.urlparse(url)
 
-    monkey.patch_all() # ?
+    monkey.patch_dns()
 
     downloader = TabDownloader(url)
     downloader.data_dir = argObj.data_dir
